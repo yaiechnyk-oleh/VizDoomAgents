@@ -1,0 +1,20 @@
+# 1. Ignore Virtual Environment
+.venv/
+venv/
+
+# 2. Ignore IDE Settings (PyCharm/VSCode)
+.idea/
+.vscode/
+*.iml
+
+# 3. Ignore Python Compiled files
+__pycache__/
+*.pyc
+
+# 4. Ignore Large Artifacts & Logs
+models/
+results/
+data/
+
+# 5. Ignore System files
+.DS_Store
