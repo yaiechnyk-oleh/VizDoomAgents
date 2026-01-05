@@ -261,6 +261,7 @@ class RewardHackAlertCallback(BaseCallback):
       - weirdly high weapon-select behavior (degenerate policies)
       - low combat signal (damage/hit/game) while moving a lot (pure running)
       - extremely high search fraction (policy not engaging combat)
+    Also tracks aim shaping signals so you can verify the agent learns to aim.
     """
 
     def __init__(
@@ -288,7 +289,6 @@ class RewardHackAlertCallback(BaseCallback):
         self._weapon_sel = 0.0
         self._total = 0.0
 
-        # reward components (means)
         self._r_damage: List[float] = []
         self._r_hit: List[float] = []
         self._r_game: List[float] = []
@@ -298,16 +298,18 @@ class RewardHackAlertCallback(BaseCallback):
         self._r_goal_pickup: List[float] = []
         self._r_goal_enemy: List[float] = []
 
-        # search shaping
         self._r_search_move: List[float] = []
         self._r_search_turn: List[float] = []
         self._r_search_idle: List[float] = []
 
-        # goal_mode distribution
+        self._r_aim: List[float] = []
+        self._r_aim_center: List[float] = []
+        self._r_attack_on_target: List[float] = []
+        self._r_no_attack_on_target: List[float] = []
+
         self._gm_counts = Counter()
         self._gm_total = 0
 
-        # end reasons inside rollout
         self._n_episodes = 0
         self._stuck_terms = 0
 
@@ -325,13 +327,11 @@ class RewardHackAlertCallback(BaseCallback):
                 if not isinstance(inf, dict):
                     continue
 
-                # goal_mode counts
                 gm = inf.get("goal_mode", None)
                 if isinstance(gm, str) and gm:
                     self._gm_counts[gm] += 1
                     self._gm_total += 1
 
-                # suspicious raw kills
                 try:
                     raw = float(inf.get("monster_kill_raw_step", 0.0))
                     att = float(inf.get("monster_kill_attrib_step", 0.0))
@@ -339,7 +339,6 @@ class RewardHackAlertCallback(BaseCallback):
                 except Exception:
                     pass
 
-                # static/stuck
                 try:
                     self._vis_static.append(float(inf.get("vis_static_steps", 0.0)))
                 except Exception:
@@ -349,13 +348,11 @@ class RewardHackAlertCallback(BaseCallback):
                 except Exception:
                     pass
 
-                # weapon select fraction
                 try:
                     self._weapon_sel += float(inf.get("weapon_select_pressed", 0.0))
                 except Exception:
                     pass
 
-                # reward components (if present)
                 if "r_damage" in inf:
                     try: self._r_damage.append(float(inf["r_damage"]))
                     except Exception: pass
@@ -381,7 +378,6 @@ class RewardHackAlertCallback(BaseCallback):
                     try: self._r_goal_enemy.append(float(inf["r_goal_dist_enemy_goal"]))
                     except Exception: pass
 
-                # search reward components
                 if "r_search_move" in inf:
                     try: self._r_search_move.append(float(inf["r_search_move"]))
                     except Exception: pass
@@ -392,7 +388,19 @@ class RewardHackAlertCallback(BaseCallback):
                     try: self._r_search_idle.append(float(inf["r_search_idle"]))
                     except Exception: pass
 
-        # episode ends
+                if "r_aim" in inf:
+                    try: self._r_aim.append(float(inf["r_aim"]))
+                    except Exception: pass
+                if "r_aim_center" in inf:
+                    try: self._r_aim_center.append(float(inf["r_aim_center"]))
+                    except Exception: pass
+                if "r_attack_on_target" in inf:
+                    try: self._r_attack_on_target.append(float(inf["r_attack_on_target"]))
+                    except Exception: pass
+                if "r_no_attack_on_target" in inf:
+                    try: self._r_no_attack_on_target.append(float(inf["r_no_attack_on_target"]))
+                    except Exception: pass
+
         if dones is not None and infos is not None:
             try:
                 dones_list = np.array(dones).reshape(-1).tolist()
@@ -434,11 +442,15 @@ class RewardHackAlertCallback(BaseCallback):
         m_r_search_turn = mean(self._r_search_turn)
         m_r_search_idle = mean(self._r_search_idle)
 
+        m_r_aim = mean(self._r_aim)
+        m_r_aim_center = mean(self._r_aim_center)
+        m_r_attack_on_target = mean(self._r_attack_on_target)
+        m_r_no_attack_on_target = mean(self._r_no_attack_on_target)
+
         search_frac = 0.0
         if self._gm_total > 0:
             search_frac = float(self._gm_counts.get("search", 0)) / float(self._gm_total)
 
-        # records
         self.logger.record("alerts/suspicious_raw_kills_rollout", float(self._susp_raw))
         self.logger.record("alerts/mean_vis_static_steps", float(mean_vis))
         self.logger.record("alerts/mean_stuck_steps", float(mean_stuck))
@@ -458,6 +470,11 @@ class RewardHackAlertCallback(BaseCallback):
         self.logger.record("alerts/mean_r_search_turn", float(m_r_search_turn))
         self.logger.record("alerts/mean_r_search_idle", float(m_r_search_idle))
         self.logger.record("alerts/search_frac_rollout", float(search_frac))
+
+        self.logger.record("alerts/mean_r_aim", float(m_r_aim))
+        self.logger.record("alerts/mean_r_aim_center", float(m_r_aim_center))
+        self.logger.record("alerts/mean_r_attack_on_target", float(m_r_attack_on_target))
+        self.logger.record("alerts/mean_r_no_attack_on_target", float(m_r_no_attack_on_target))
 
         self.logger.record("alerts/stuck_term_frac_rollout", float(stuck_term_frac))
         self.logger.record("alerts/combat_signal_rollout", float(combat_signal))
@@ -484,7 +501,6 @@ class RewardHackAlertCallback(BaseCallback):
             if search_frac >= self.warn_search_frac:
                 print(f"[ALERT] search_frac high: {search_frac:.2f} (agent spending too much time searching / not engaging)")
 
-        # reset
         self._susp_raw = 0.0
         self._vis_static.clear()
         self._stuck_steps.clear()
@@ -504,6 +520,11 @@ class RewardHackAlertCallback(BaseCallback):
         self._r_search_move.clear()
         self._r_search_turn.clear()
         self._r_search_idle.clear()
+
+        self._r_aim.clear()
+        self._r_aim_center.clear()
+        self._r_attack_on_target.clear()
+        self._r_no_attack_on_target.clear()
 
         self._gm_counts.clear()
         self._gm_total = 0
@@ -538,7 +559,7 @@ def evaluate_recurrent_policy(model, env, n_episodes: int, deterministic: bool =
         episode_start = np.ones((env.num_envs,), dtype=bool)
         done = [False]
         ep_rew = 0.0
-        last_info: Dict[str, Any] | None = None
+        last_info: Optional[Dict[str, Any]] = None
 
         while not done[0]:
             action, state = model.predict(

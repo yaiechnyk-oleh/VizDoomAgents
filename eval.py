@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 
 import numpy as np
 from sb3_contrib.ppo_recurrent import RecurrentPPO
@@ -58,7 +58,7 @@ def _unwrap_env(vec_env) -> Any:
     return None
 
 
-def _safe_getattr(obj: Any, names: list[str]) -> Any:
+def _safe_getattr(obj: Any, names: List[str]) -> Any:
     for n in names:
         if hasattr(obj, n):
             return getattr(obj, n)
@@ -97,7 +97,7 @@ def _describe_action(base_env: Any, action_id: int) -> str:
         return f"id={action_id} (decode failed: {e})"
 
 
-def _extract_step_vars(info: dict[str, Any]) -> dict[str, float]:
+def _extract_step_vars(info: Dict[str, Any]) -> Dict[str, float]:
     def g(*keys: str, default: float = 0.0) -> float:
         for k in keys:
             if k in info:
@@ -135,34 +135,42 @@ def _extract_step_vars(info: dict[str, Any]) -> dict[str, float]:
         "weapon_select_pressed": g("weapon_select_pressed"),
         "weapon_changed": g("weapon_changed"),
 
-        # enemy distance + reward components
         "enemy_dist": g("enemy_dist", default=-1.0),
         "enemy_dist_delta": g("enemy_dist_delta"),
+        "enemy_visible": g("enemy_visible"),
+        "enemy_angle_err": g("enemy_angle_err"),
+        "enemy_angle_err_abs": g("enemy_angle_err_abs", default=180.0),
+
         "r_enemy_dist": g("r_enemy_dist"),
         "r_enemy_dist_retreat": g("r_enemy_dist_retreat"),
         "r_enemy_close": g("r_enemy_close"),
         "r_enemy_panic": g("r_enemy_panic"),
 
-        # goal distance + reward components
         "goal_dist": g("goal_dist", default=-1.0),
         "goal_dist_delta": g("goal_dist_delta"),
         "r_goal_dist_pickup": g("r_goal_dist_pickup"),
         "r_goal_dist_enemy_goal": g("r_goal_dist_enemy_goal"),
 
-        # NEW: search shaping components
         "r_search_move": g("r_search_move"),
         "r_search_turn": g("r_search_turn"),
         "r_search_idle": g("r_search_idle"),
+
+        "r_aim": g("r_aim"),
+        "r_aim_center": g("r_aim_center"),
+        "r_attack_on_target": g("r_attack_on_target"),
+        "r_no_attack_on_target": g("r_no_attack_on_target"),
     }
 
 
-def _pretty_deltas(prev: dict[str, float], cur: dict[str, float], keys: list[str]) -> str:
+def _pretty_deltas(prev: Dict[str, float], cur: Dict[str, float], keys: List[str]) -> str:
     parts = []
     for k in keys:
         dp = float(cur.get(k, 0.0) - prev.get(k, 0.0))
         if dp == 0.0:
             continue
         if "dist" in k:
+            parts.append(f"Δ{k}={dp:+.2f}")
+        elif "err" in k:
             parts.append(f"Δ{k}={dp:+.2f}")
         elif k in ("kill_credit",):
             parts.append(f"Δ{k}={dp:+.3f}")
@@ -171,8 +179,8 @@ def _pretty_deltas(prev: dict[str, float], cur: dict[str, float], keys: list[str
     return " ".join(parts) if parts else "(no deltas)"
 
 
-def _parse_int_list(spec: str) -> list[int]:
-    out: list[int] = []
+def _parse_int_list(spec: str) -> List[int]:
+    out: List[int] = []
     for s in re.split(r"[,\s]+", spec.strip()):
         if not s:
             continue
@@ -203,7 +211,6 @@ def main():
     p.add_argument("--use_game_reward", action="store_true", help="Use Doom make_action reward (NOT recommended; noisy)")
     p.add_argument("--disable_game_reward", action="store_true", help="Deprecated")
 
-    # diagnostics
     p.add_argument("--diag", action="store_true", help="Enable step-by-step diagnostics")
     p.add_argument("--diag_every", type=int, default=10)
     p.add_argument("--diag_first", type=int, default=50)
@@ -236,7 +243,6 @@ def main():
 
     base_env = _unwrap_env(env)
 
-    # Print runtime vars once
     try:
         vars0 = env.get_attr("_vars")[0]
         print("\n=== RUNTIME GAME VARIABLES (env._vars) ===")
@@ -260,7 +266,7 @@ def main():
             print("[diag] cannot decode actions:", e)
 
     overall_action_counts: Counter[int] = Counter()
-    results: list[EpisodeResult] = []
+    results: List[EpisodeResult] = []
 
     out_path: Optional[Path] = Path(args.out) if args.out else None
     if out_path:
@@ -273,11 +279,11 @@ def main():
 
         done = [False]
         ep_rew = 0.0
-        last_info: dict[str, Any] | None = None
+        last_info: Optional[Dict[str, Any]] = None
         ep_action_counts: Counter[int] = Counter()
         steps = 0
 
-        prev_vars: dict[str, float] | None = None
+        prev_vars: Optional[Dict[str, float]] = None
         suspicious_local = 0.0
 
         while not done[0]:
@@ -340,19 +346,25 @@ def main():
                             "kill_credit",
                             "steps_since_attack",
 
+                            "enemy_visible",
                             "enemy_dist",
                             "enemy_dist_delta",
+                            "enemy_angle_err_abs",
                             "r_enemy_dist",
                             "r_enemy_dist_retreat",
                             "r_enemy_close",
                             "r_enemy_panic",
+
+                            "r_aim",
+                            "r_aim_center",
+                            "r_attack_on_target",
+                            "r_no_attack_on_target",
 
                             "goal_dist",
                             "goal_dist_delta",
                             "r_goal_dist_pickup",
                             "r_goal_dist_enemy_goal",
 
-                            # NEW
                             "r_search_move",
                             "r_search_turn",
                             "r_search_idle",

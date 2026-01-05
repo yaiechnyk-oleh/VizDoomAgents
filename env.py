@@ -123,7 +123,7 @@ class RewardWeights:
     goal_dist_norm: float = 64.0
     goal_dist_step_cap: float = 60.0
 
-    # -------- strict switching policy (YOUR REQUIREMENT) --------
+    # -------- strict switching policy --------
     goal_hp_crit: float = 20.0
     goal_ammo_crit: float = 5.0
 
@@ -136,6 +136,18 @@ class RewardWeights:
     search_turn_bonus: float = 0.006
     search_turn_norm_deg: float = 30.0
     search_idle_penalty: float = 0.002
+
+    # -------- aiming / engagement (NEW) --------
+    aim: float = 0.015
+    aim_err_norm_deg: float = 45.0
+    aim_center_thr_deg: float = 8.0
+    aim_center_bonus: float = 0.010
+    attack_on_target_bonus: float = 0.030
+    no_attack_on_target_penalty: float = 0.004
+    engage_dist_max: float = 320.0
+
+    # target lock to avoid "skipping past enemies"
+    target_hold_steps: int = 12
 
     clip_min: float = -30.0
     clip_max: float = 30.0
@@ -228,6 +240,16 @@ def persona_weights(persona: str) -> RewardWeights:
             search_turn_bonus=0.007,
             search_turn_norm_deg=30.0,
             search_idle_penalty=0.002,
+
+            # NEW: aiming / engagement
+            aim=0.022,
+            aim_err_norm_deg=45.0,
+            aim_center_thr_deg=8.0,
+            aim_center_bonus=0.012,
+            attack_on_target_bonus=0.040,
+            no_attack_on_target_penalty=0.006,
+            engage_dist_max=320.0,
+            target_hold_steps=14,
 
             step_penalty=0.0,
         )
@@ -394,6 +416,10 @@ class DoomDeathmatchEnv(gym.Env):
 
         # Goal mode
         self._goal_mode: str = "enemy"
+
+        # Target lock (NEW)
+        self._target_id: Optional[int] = None
+        self._target_hold: int = 0
 
         # Previous info for deltas
         self._prev_info: Optional[Dict[str, Any]] = None
@@ -570,15 +596,39 @@ class DoomDeathmatchEnv(gym.Env):
 
         return float(best) if best is not None else -1.0
 
-    def _nearest_enemy_distance(self, info: Dict[str, Any]) -> float:
+    def _enemy_target_state(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Returns enemy targeting info:
+          enemy_dist              [-1 if none]
+          enemy_visible           {0,1} (best-effort)
+          enemy_angle_err         signed deg in [-180,180]
+          enemy_angle_err_abs     abs deg in [0,180]
+          enemy_target_id         int (or -1)
+          enemy_on_target         {0,1} if abs_err <= aim_center_thr_deg
+        Uses object id if available; otherwise falls back to stable index.
+        Keeps last target for w.target_hold_steps while it remains present in objects.
+        """
         st = self.game.get_state()
         if st is None or not hasattr(st, "objects") or st.objects is None:
-            return -1.0
+            self._target_hold = max(0, self._target_hold - 1)
+            if self._target_hold <= 0:
+                self._target_id = None
+            return {
+                "enemy_dist": -1.0,
+                "enemy_visible": 0.0,
+                "enemy_angle_err": 0.0,
+                "enemy_angle_err_abs": 180.0,
+                "enemy_target_id": -1,
+                "enemy_on_target": 0.0,
+            }
 
         ax = float(info.get("pos_x", 0.0))
         ay = float(info.get("pos_y", 0.0))
+        ang = float(info.get("angle", 0.0))
 
-        best = None
+        enemies: List[Tuple[int, float, float]] = []  # (id, dist, err_signed)
+        fallback_id = 1
+
         for o in st.objects:
             nm = getattr(o, "name", None)
             if not nm:
@@ -592,12 +642,67 @@ class DoomDeathmatchEnv(gym.Env):
             if nl not in self.ENEMY_NAMES:
                 continue
 
+            vis_attr = getattr(o, "visible", None)
+            if vis_attr is not None and (not bool(vis_attr)):
+                continue
+
             ox = float(getattr(o, "position_x", 0.0))
             oy = float(getattr(o, "position_y", 0.0))
-            d = float(np.sqrt((ox - ax) ** 2 + (oy - ay) ** 2))
-            best = d if best is None else min(best, d)
+            dx = ox - ax
+            dy = oy - ay
+            dist = float(np.hypot(dx, dy))
 
-        return float(best) if best is not None else -1.0
+            # Bearing from agent to object in degrees (0..360)
+            bearing = (float(np.degrees(np.arctan2(dy, dx))) + 360.0) % 360.0
+            # Signed error relative to agent angle
+            err = float(self._angle_delta_deg(bearing, ang))
+
+            oid = getattr(o, "id", None)
+            if oid is None:
+                oid = getattr(o, "object_id", None)
+            if oid is None:
+                oid = fallback_id
+                fallback_id += 1
+
+            enemies.append((int(oid), dist, err))
+
+        if not enemies:
+            self._target_hold = max(0, self._target_hold - 1)
+            if self._target_hold <= 0:
+                self._target_id = None
+            return {
+                "enemy_dist": -1.0,
+                "enemy_visible": 0.0,
+                "enemy_angle_err": 0.0,
+                "enemy_angle_err_abs": 180.0,
+                "enemy_target_id": -1,
+                "enemy_on_target": 0.0,
+            }
+
+        chosen: Optional[Tuple[int, float, float]] = None
+        if self._target_id is not None:
+            for oid, dist, err in enemies:
+                if oid == self._target_id:
+                    chosen = (oid, dist, err)
+                    break
+
+        if chosen is None:
+            chosen = min(enemies, key=lambda t: t[1])
+            self._target_id = int(chosen[0])
+
+        self._target_hold = int(self.w.target_hold_steps)
+
+        oid, dist, err = chosen
+        err_abs = float(abs(err))
+        on_target = 1.0 if err_abs <= float(self.w.aim_center_thr_deg) else 0.0
+        return {
+            "enemy_dist": float(dist),
+            "enemy_visible": 1.0,
+            "enemy_angle_err": float(err),
+            "enemy_angle_err_abs": float(err_abs),
+            "enemy_target_id": int(oid),
+            "enemy_on_target": float(on_target),
+        }
 
     def _choose_goal_mode(self, info: Dict[str, Any]) -> str:
         """
@@ -612,8 +717,7 @@ class DoomDeathmatchEnv(gym.Env):
 
         hp = float(info.get("health", 0.0))
         ammo = float(info.get("ammo_total", 0.0))
-        enemy_dist = float(info.get("enemy_dist", -1.0))
-        enemy_visible = enemy_dist >= 0.0
+        enemy_visible = bool(float(info.get("enemy_visible", 0.0)) > 0.0)
 
         # Hysteresis keep mode until exit
         if self._goal_mode == "hp":
@@ -765,7 +869,9 @@ class DoomDeathmatchEnv(gym.Env):
         SP = "SPEED"
 
         STRAFE = 20.0
-        TURN = 12.0
+        TURN_AIM = 6.0
+        TURN_RUN = 12.0
+        TURN_FAST = 22.0
 
         actions.append(self._zero_action())                         # 00 NOOP
 
@@ -778,24 +884,24 @@ class DoomDeathmatchEnv(gym.Env):
         self._add_action(actions, [(MF, 1.0), (LRD, -STRAFE)])     # 05
         self._add_action(actions, [(MF, 1.0), (LRD, +STRAFE)])     # 06
 
-        self._add_action(actions, [(TRD, -TURN)])                  # 07
-        self._add_action(actions, [(TRD, +TURN)])                  # 08
+        self._add_action(actions, [(TRD, -TURN_AIM)])              # 07
+        self._add_action(actions, [(TRD, +TURN_AIM)])              # 08
 
-        self._add_action(actions, [(MF, 1.0), (TRD, -TURN)])       # 09
-        self._add_action(actions, [(MF, 1.0), (TRD, +TURN)])       # 10
+        self._add_action(actions, [(MF, 1.0), (TRD, -TURN_RUN)])   # 09
+        self._add_action(actions, [(MF, 1.0), (TRD, +TURN_RUN)])   # 10
 
         self._add_action(actions, [(AT, 1.0)])                     # 11
         self._add_action(actions, [(AT, 1.0), (MF, 1.0)])          # 12
-        self._add_action(actions, [(AT, 1.0), (TRD, -TURN)])       # 13
-        self._add_action(actions, [(AT, 1.0), (TRD, +TURN)])       # 14
+        self._add_action(actions, [(AT, 1.0), (TRD, -TURN_AIM)])   # 13
+        self._add_action(actions, [(AT, 1.0), (TRD, +TURN_AIM)])   # 14
         self._add_action(actions, [(AT, 1.0), (LRD, -STRAFE)])     # 15
         self._add_action(actions, [(AT, 1.0), (LRD, +STRAFE)])     # 16
 
         self._add_action(actions, [(SP, 1.0), (MF, 1.0)])                          # 17
         self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, -STRAFE)])          # 18
         self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, +STRAFE)])          # 19
-        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, -TURN)])            # 20
-        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, +TURN)])            # 21
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, -TURN_FAST)])       # 20
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, +TURN_FAST)])       # 21
 
         if self.enable_weapon_actions:
             for i in range(1, 7):
@@ -926,6 +1032,10 @@ class DoomDeathmatchEnv(gym.Env):
         # ---- Enemy distance shaping ----
         enemy_now = float(info.get("enemy_dist", -1.0))
         enemy_prev = float(prev.get("enemy_dist", enemy_now))
+        enemy_visible = bool(float(info.get("enemy_visible", 0.0)) > 0.0)
+
+        err_abs_now = float(info.get("enemy_angle_err_abs", 180.0))
+        err_abs_prev = float(prev.get("enemy_angle_err_abs", err_abs_now))
 
         if enemy_now >= 0.0 and enemy_prev >= 0.0:
             delta_close = float(enemy_prev - enemy_now)
@@ -952,6 +1062,20 @@ class DoomDeathmatchEnv(gym.Env):
                     denom = max(1e-6, (w.enemy_min_safe - w.enemy_too_close))
                     close_scale = float(np.clip((w.enemy_min_safe - enemy_now) / denom, 0.0, 1.0))
                     add("enemy_close", -w.enemy_close_penalty * close_scale * float(delta_close_norm))
+
+        # ---- Aim shaping (NEW) ----
+        if enemy_visible:
+            d_err = float(err_abs_prev - err_abs_now)
+            d_err_norm = float(np.clip(d_err / max(1e-6, w.aim_err_norm_deg), -1.0, 1.0))
+            add("aim", w.aim * d_err_norm)
+
+            if err_abs_now <= w.aim_center_thr_deg:
+                add("aim_center", w.aim_center_bonus)
+                if flags["attack"]:
+                    add("attack_on_target", w.attack_on_target_bonus)
+                else:
+                    if enemy_now >= 0.0 and enemy_now <= w.engage_dist_max and ammo_prev > 0.0:
+                        add("no_attack_on_target", -w.no_attack_on_target_penalty)
 
         # ---- Goal distance shaping ----
         goal_now = float(info.get("goal_dist", -1.0))
@@ -1002,21 +1126,18 @@ class DoomDeathmatchEnv(gym.Env):
         add("hits_taken", -w.hits_taken * hits_taken_d)
 
         # ---- Pickups shaping (NEED-BASED + CAPS) ----
-        # Health: reward only if it is actually needed (critical -> highest)
         if hp_gain > 0:
             gain = float(min(hp_gain, w.health_pickup_cap))
             need = self._need_scale(hp_prev, w.goal_hp_crit, w.goal_hp_exit_margin)
             mult = w.low_health_pickup_mult if hp_prev <= w.goal_hp_crit else 1.0
             add("hp_pickup", w.health_pickup * gain * need * mult)
 
-        # Ammo: reward only if ammo is near/under critical thresholds
         if ammo_gain > 0:
             gain = float(min(ammo_gain, w.ammo_pickup_cap))
             need = self._need_scale(ammo_prev, w.goal_ammo_crit, w.goal_ammo_exit_margin)
             mult = w.low_ammo_pickup_mult if ammo_prev <= w.goal_ammo_crit else 1.0
             add("ammo_pickup", w.ammo_pickup * gain * need * mult)
 
-        # Armor: tiny reward; meaningful only if you had zero armor
         if ar_gain > 0:
             gain = float(min(ar_gain, w.armor_pickup_cap))
             need = 1.0 if ar_prev <= 0.0 else float(w.armor_have_scale)
@@ -1118,14 +1239,23 @@ class DoomDeathmatchEnv(gym.Env):
 
         # Shooting hygiene
         if flags["attack"]:
+            shoot_scale = 1.0
+            if enemy_visible:
+                if err_abs_now <= w.aim_center_thr_deg * 2.0:
+                    shoot_scale = 0.25
+                elif err_abs_now <= w.aim_err_norm_deg:
+                    shoot_scale = 0.50
+                elif err_abs_now <= w.aim_err_norm_deg * 2.0:
+                    shoot_scale = 0.80
+
             if ammo_now <= 0.0:
                 add("shoot_no_ammo", -w.shoot_no_ammo)
 
             if (dmg_d <= 0.0) and (hit_d <= 0.0) and (monster_kill_attrib <= 0.0):
-                add("shoot_no_damage", -w.shoot_no_damage)
+                add("shoot_no_damage", -w.shoot_no_damage * shoot_scale)
 
             if (hit_d <= 0.0) and (monster_kill_attrib <= 0.0):
-                add("shoot_no_hit", -w.shoot_no_hit)
+                add("shoot_no_hit", -w.shoot_no_hit * shoot_scale)
 
             ammo_sel_now = float(info.get("selected_weapon_ammo", 0.0))
             ammo_spent = max(0.0, ammo_sel_prev - ammo_sel_now)
@@ -1135,7 +1265,7 @@ class DoomDeathmatchEnv(gym.Env):
                 and (hit_d <= 0.0)
                 and (monster_kill_attrib <= 0.0)
             ):
-                add("shoot_waste_ammo", -w.shoot_waste_ammo * ammo_spent)
+                add("shoot_waste_ammo", -w.shoot_waste_ammo * ammo_spent * shoot_scale)
 
         if death_d > 0:
             add("death", -w.death * death_d)
@@ -1175,6 +1305,9 @@ class DoomDeathmatchEnv(gym.Env):
 
         self._goal_mode = "enemy"
 
+        self._target_id = None
+        self._target_hold = 0
+
         self._ep_killcount = 0.0
         self._ep_fragcount = 0.0
         self._ep_monster_kills_raw = 0.0
@@ -1195,7 +1328,7 @@ class DoomDeathmatchEnv(gym.Env):
         obs = self._get_obs_from_gray(gray)
 
         info = self._get_info()
-        info["enemy_dist"] = float(self._nearest_enemy_distance(info))
+        info.update(self._enemy_target_state(info))
 
         info["goal_mode"] = self._choose_goal_mode(info)
 
@@ -1204,8 +1337,8 @@ class DoomDeathmatchEnv(gym.Env):
         elif info["goal_mode"] == "ammo":
             info["goal_dist"] = float(self._nearest_named_distance(info, self.AMMO_NAMES))
         elif info["goal_mode"] == "enemy":
-            info["goal_dist"] = float(info["enemy_dist"])
-        else:  # search
+            info["goal_dist"] = float(info.get("enemy_dist", -1.0))
+        else:
             info["goal_dist"] = -1.0
 
         info["enemy_dist_delta"] = 0.0
@@ -1233,14 +1366,16 @@ class DoomDeathmatchEnv(gym.Env):
             "angle": float(info["angle"]),
 
             "enemy_dist": float(info.get("enemy_dist", -1.0)),
+            "enemy_visible": float(info.get("enemy_visible", 0.0)),
+            "enemy_angle_err_abs": float(info.get("enemy_angle_err_abs", 180.0)),
+
             "goal_mode": str(info.get("goal_mode", "enemy")),
             "goal_dist": float(info.get("goal_dist", -1.0)),
         }
 
         if _USING_GYMNASIUM:
             return obs, info
-        else:  # pragma: no cover
-            return obs
+        return obs
 
     def step(self, action: int):
         self._step_count += 1
@@ -1275,7 +1410,7 @@ class DoomDeathmatchEnv(gym.Env):
         obs = self._get_obs_from_gray(gray)
         info = self._get_info()
 
-        info["enemy_dist"] = float(self._nearest_enemy_distance(info))
+        info.update(self._enemy_target_state(info))
         if self._prev_info is not None:
             prev_enemy = float(self._prev_info.get("enemy_dist", -1.0))
             cur_enemy = float(info["enemy_dist"])
@@ -1290,8 +1425,8 @@ class DoomDeathmatchEnv(gym.Env):
         elif info["goal_mode"] == "ammo":
             info["goal_dist"] = float(self._nearest_named_distance(info, self.AMMO_NAMES))
         elif info["goal_mode"] == "enemy":
-            info["goal_dist"] = float(info["enemy_dist"])
-        else:  # search
+            info["goal_dist"] = float(info.get("enemy_dist", -1.0))
+        else:
             info["goal_dist"] = -1.0
 
         if self._prev_info is not None:
@@ -1376,6 +1511,9 @@ class DoomDeathmatchEnv(gym.Env):
             "angle": float(info["angle"]),
 
             "enemy_dist": float(info.get("enemy_dist", -1.0)),
+            "enemy_visible": float(info.get("enemy_visible", 0.0)),
+            "enemy_angle_err_abs": float(info.get("enemy_angle_err_abs", 180.0)),
+
             "goal_mode": str(info.get("goal_mode", "enemy")),
             "goal_dist": float(info.get("goal_dist", -1.0)),
         }
@@ -1398,9 +1536,8 @@ class DoomDeathmatchEnv(gym.Env):
 
         if _USING_GYMNASIUM:
             return obs, float(reward), terminated, truncated, info
-        else:  # pragma: no cover
-            done = bool(terminated or truncated)
-            return obs, float(reward), done, info
+        done = bool(terminated or truncated)
+        return obs, float(reward), done, info
 
     def close(self):
         try:

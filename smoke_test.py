@@ -9,7 +9,6 @@ import numpy as np
 
 from env import DoomDeathmatchEnv
 
-
 def assert_obs(obs: np.ndarray, stack: int, size: int) -> None:
     assert isinstance(obs, np.ndarray), f"obs must be np.ndarray, got {type(obs)}"
     assert obs.dtype == np.uint8, f"obs dtype must be uint8, got {obs.dtype}"

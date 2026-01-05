@@ -148,9 +148,12 @@ def main():
         "vis_static_steps",
         "stuck_steps",
 
-        # enemy distance shaping
+        # enemy distance shaping (+ aiming telemetry)
         "enemy_dist",
         "enemy_dist_delta",
+        "enemy_visible",
+        "enemy_angle_err",
+        "enemy_angle_err_abs",
         "r_enemy_dist",
         "r_enemy_dist_retreat",
         "r_enemy_close",
@@ -162,10 +165,16 @@ def main():
         "r_goal_dist_pickup",
         "r_goal_dist_enemy_goal",
 
-        # NEW: search shaping
+        # search shaping
         "r_search_move",
         "r_search_turn",
         "r_search_idle",
+
+        # NEW: aim shaping
+        "r_aim",
+        "r_aim_center",
+        "r_attack_on_target",
+        "r_no_attack_on_target",
 
         # combat
         "r_damage",
