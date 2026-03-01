@@ -6,7 +6,7 @@ import time
 
 from sb3_contrib.ppo_recurrent import RecurrentPPO
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 
 from env import make_env
 from cnn_gru import CnnGruPolicy, CustomCNN
@@ -45,6 +45,7 @@ def main():
     p.add_argument("--own_kill_user_var", type=int, default=0)
 
     p.add_argument("--disable_weapon_actions", action="store_true")
+    p.add_argument("--resume", type=str, default="", help="Path to a .zip model to resume training from")
 
     # IMPORTANT: game_reward OFF by default.
     p.add_argument("--use_game_reward", action="store_true", help="Use Doom make_action reward (NOT recommended; noisy)")
@@ -87,7 +88,8 @@ def main():
                 use_game_reward=use_game_reward,
             )
         )
-    train_env = DummyVecEnv(env_fns)
+    # Use SubprocVecEnv to utilize multiple CPU cores (e.g. 8 on M1 Pro)
+    train_env = SubprocVecEnv(env_fns)
     train_env = VecMonitor(train_env)
 
     # Separate eval env (single env)
@@ -116,24 +118,35 @@ def main():
         enable_critic_lstm=False,
     )
 
-    model = RecurrentPPO(
-        policy=CnnGruPolicy,
-        env=train_env,
-        learning_rate=args.lr,
-        n_steps=128,
-        batch_size=256,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.1,
-        ent_coef=args.ent_coef,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        policy_kwargs=policy_kwargs,
-        device="auto",
-        verbose=1,
-        seed=args.seed,
-    )
+    if args.resume and os.path.exists(args.resume):
+        print(f"Loading existing model for resume: {args.resume}")
+        model = RecurrentPPO.load(
+            args.resume,
+            env=train_env,
+            learning_rate=args.lr,
+            device="auto",
+        )
+        # Ensure ent_coef is updated to the current train run's setting since it's annealed
+        model.ent_coef = args.ent_coef
+    else:
+        model = RecurrentPPO(
+            policy=CnnGruPolicy,
+            env=train_env,
+            learning_rate=args.lr,
+            n_steps=128,
+            batch_size=256,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.1,
+            ent_coef=args.ent_coef,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs,
+            device="auto",
+            verbose=1,
+            seed=args.seed,
+        )
 
     # Log rollout means of reward components + attribution signals
     info_keys = [
@@ -238,6 +251,9 @@ def main():
     print(f"[saved] last model -> {last_path}")
     print(f"[saved] best model -> {best_path}")
 
+    # Explicitly close environments to gracefully terminate multiprocessing workers
+    train_env.close()
+    eval_env.close()
 
 if __name__ == "__main__":
     main()

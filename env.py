@@ -76,9 +76,9 @@ class RewardWeights:
     # Movement / anti-camp
     move: float = 0.022
     under_fire_move_bonus: float = 0.018
-    idle: float = 0.0022
+    idle: float = 0.015
     bump: float = 0.030
-    stuck: float = 0.12
+    stuck: float = 0.20
 
     inactive: float = 0.020
 
@@ -110,9 +110,9 @@ class RewardWeights:
     enemy_dist_norm: float = 64.0
     enemy_min_safe: float = 80.0
     enemy_too_close: float = 48.0
-    enemy_close_penalty: float = 0.030
+    enemy_close_penalty: float = 0.080
     enemy_retreat: float = 0.020
-    enemy_panic_penalty: float = 0.050
+    enemy_panic_penalty: float = 0.150
 
     enemy_retreat_low_health: float = 25.0
     enemy_retreat_low_ammo: float = 3.0
@@ -141,8 +141,8 @@ class RewardWeights:
     aim: float = 0.015
     aim_err_norm_deg: float = 45.0
     aim_center_thr_deg: float = 8.0
-    aim_center_bonus: float = 0.010
-    attack_on_target_bonus: float = 0.030
+    aim_center_bonus: float = 0.050
+    attack_on_target_bonus: float = 0.100
     no_attack_on_target_penalty: float = 0.004
     engage_dist_max: float = 320.0
 
@@ -186,11 +186,11 @@ def persona_weights(persona: str) -> RewardWeights:
             low_health_thr=40.0,
             low_ammo_thr=6.0,
 
-            move=0.012,
+            move=0.008,
             under_fire_move_bonus=0.020,
-            idle=0.0025,
+            idle=0.010,
             bump=0.032,
-            stuck=0.13,
+            stuck=0.18,
 
             inactive=0.024,
 
@@ -221,8 +221,8 @@ def persona_weights(persona: str) -> RewardWeights:
             enemy_dist_norm=64.0,
             enemy_min_safe=80.0,
             enemy_too_close=48.0,
-            enemy_close_penalty=0.030,
-            enemy_panic_penalty=0.060,
+            enemy_close_penalty=0.080,
+            enemy_panic_penalty=0.150,
             enemy_retreat_low_health=25.0,
             enemy_retreat_low_ammo=3.0,
 
@@ -242,12 +242,12 @@ def persona_weights(persona: str) -> RewardWeights:
             search_idle_penalty=0.002,
 
             # NEW: aiming / engagement
-            aim=0.022,
+            aim=0.10,
             aim_err_norm_deg=45.0,
-            aim_center_thr_deg=8.0,
-            aim_center_bonus=0.012,
-            attack_on_target_bonus=0.040,
-            no_attack_on_target_penalty=0.006,
+            aim_center_thr_deg=15.0,
+            aim_center_bonus=0.080,
+            attack_on_target_bonus=0.200,
+            no_attack_on_target_penalty=0.025,
             engage_dist_max=320.0,
             target_hold_steps=14,
 
@@ -974,6 +974,15 @@ class DoomDeathmatchEnv(gym.Env):
             d_ang = float(self._angle_delta_deg(float(info["angle"]), float(prev.get("angle", info["angle"]))))
 
         move_term = min(dist / 16.0, 1.0)
+        
+        enemy_visible = bool(float(info.get("enemy_visible", 0.0)) > 0.0)
+        if enemy_visible:
+            enemy_dist_now = float(info.get("enemy_dist", -1.0))
+            if enemy_dist_now >= 0 and enemy_dist_now <= w.engage_dist_max:
+                move_term = min(move_term, 0.15)  # heavy cap during combat range
+            else:
+                move_term = min(move_term, 0.5)
+
         add("move", w.move * move_term)
 
         if self._under_fire_steps > 0:
@@ -1042,15 +1051,14 @@ class DoomDeathmatchEnv(gym.Env):
             delta_close_norm = float(np.clip(delta_close / max(1e-6, w.enemy_dist_norm), -1.0, 1.0))
 
             retreat = (hp_prev <= w.enemy_retreat_low_health) or (ammo_prev <= w.enemy_retreat_low_ammo)
-            if enemy_now <= w.enemy_too_close:
-                retreat = True
 
             if retreat:
                 delta_far = float(enemy_now - enemy_prev)
                 delta_far_norm = float(np.clip(delta_far / max(1e-6, w.enemy_dist_norm), -1.0, 1.0))
                 add("enemy_dist_retreat", w.enemy_retreat * delta_far_norm)
 
-                if enemy_now < w.enemy_too_close:
+                # Only panic if getting closer while trying to retreat, otherwise if escaping, don't penalize.
+                if enemy_now < w.enemy_too_close and delta_far < 0.0:
                     panic_scale = float(
                         np.clip((w.enemy_too_close - enemy_now) / max(1e-6, w.enemy_too_close), 0.0, 1.0)
                     )

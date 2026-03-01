@@ -286,15 +286,33 @@ def main():
         prev_vars: Optional[Dict[str, float]] = None
         suspicious_local = 0.0
 
+        action_history: List[int] = []
+        stuck_recovery_steps = 0
+
         while not done[0]:
+            force_stochastic = False
+            if det:
+                if len(action_history) >= 15 and len(set(action_history[-15:])) == 1:
+                    stuck_recovery_steps = 3  # Force stochastic for 3 steps to break out
+                    action_history.clear()
+                
+                if stuck_recovery_steps > 0:
+                    force_stochastic = True
+                    stuck_recovery_steps -= 1
+
             action, state = model.predict(
                 obs,
                 state=state,
                 episode_start=episode_start,
-                deterministic=det,
+                deterministic=det and not force_stochastic,
             )
 
             a0 = int(action[0])
+            if det:
+                action_history.append(a0)
+                if len(action_history) > 20:
+                    action_history.pop(0)
+                    
             overall_action_counts[a0] += 1
             ep_action_counts[a0] += 1
 
