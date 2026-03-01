@@ -157,8 +157,8 @@ def persona_weights(persona: str) -> RewardWeights:
     persona = (persona or "rusher").lower().strip()
     if persona == "rusher":
         return RewardWeights(
-            damage=0.075,
-            hit=0.30,
+            damage=0.100,
+            hit=0.45,
             damage_taken=0.035,
             hits_taken=0.06,
             death=14.0,
@@ -187,7 +187,7 @@ def persona_weights(persona: str) -> RewardWeights:
             low_ammo_thr=6.0,
 
             move=0.008,
-            under_fire_move_bonus=0.020,
+            under_fire_move_bonus=0.040,
             idle=0.010,
             bump=0.032,
             stuck=0.18,
@@ -245,8 +245,8 @@ def persona_weights(persona: str) -> RewardWeights:
             aim=0.10,
             aim_err_norm_deg=45.0,
             aim_center_thr_deg=15.0,
-            aim_center_bonus=0.080,
-            attack_on_target_bonus=0.200,
+            aim_center_bonus=0.100,
+            attack_on_target_bonus=0.300,
             no_attack_on_target_penalty=0.025,
             engage_dist_max=320.0,
             target_hold_steps=14,
@@ -903,6 +903,27 @@ class DoomDeathmatchEnv(gym.Env):
         self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, -TURN_FAST)])       # 20
         self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, +TURN_FAST)])       # 21
 
+        # NEW Evasion Combos
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (TRD, -TURN_FAST)])       # 22 (Flee + look around)
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (TRD, +TURN_FAST)])       # 23 (Flee + look around)
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (LRD, -STRAFE)])          # 24 (Backpedal left)
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (LRD, +STRAFE)])          # 25 (Backpedal right)
+
+        # NEW Circle-Strafing
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, -STRAFE), (TRD, +TURN_RUN)]) # 26 (Circle Right)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, +STRAFE), (TRD, -TURN_RUN)]) # 27 (Circle Left)
+
+        # NEW Aggressive Run-and-Gun Combos
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (AT, 1.0)])                                  # 28 (Sprint fire)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, -TURN_RUN), (AT, 1.0)])                # 29 (Sprint turn fire)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (TRD, +TURN_RUN), (AT, 1.0)])                # 30 (Sprint turn fire)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, -STRAFE), (AT, 1.0)])                  # 31 (Sprint strafe fire)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, +STRAFE), (AT, 1.0)])                  # 32 (Sprint strafe fire)
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (TRD, -TURN_RUN), (AT, 1.0)])                # 33 (Kite fire)
+        self._add_action(actions, [(SP, 1.0), (MB, 1.0), (TRD, +TURN_RUN), (AT, 1.0)])                # 34 (Kite fire)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, -STRAFE), (TRD, +TURN_RUN), (AT, 1.0)])# 35 (Shoot while Circle-Strafe)
+        self._add_action(actions, [(SP, 1.0), (MF, 1.0), (LRD, +STRAFE), (TRD, -TURN_RUN), (AT, 1.0)])# 36 (Shoot while Circle-Strafe)
+
         if self.enable_weapon_actions:
             for i in range(1, 7):
                 self._add_action(actions, [(f"SELECT_WEAPON{i}", 1.0)])
@@ -1084,6 +1105,10 @@ class DoomDeathmatchEnv(gym.Env):
                 else:
                     if enemy_now >= 0.0 and enemy_now <= w.engage_dist_max and ammo_prev > 0.0:
                         add("no_attack_on_target", -w.no_attack_on_target_penalty)
+            else:
+                # Penalty for blind firing (shooting while crosshair is wildly off target)
+                if flags["attack"]:
+                    add("shoot_no_target", -0.010)
 
         # ---- Goal distance shaping ----
         goal_now = float(info.get("goal_dist", -1.0))
