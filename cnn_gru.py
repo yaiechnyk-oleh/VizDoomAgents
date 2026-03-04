@@ -3,19 +3,29 @@ from __future__ import annotations
 import torch as th
 import torch.nn as nn
 
+from gymnasium import spaces
 from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 
-class CustomCNN(BaseFeaturesExtractor):
+class CnnStateExtractor(BaseFeaturesExtractor):
     """
-    CNN extractor for images in CHW format.
-    Supports any channel count (e.g., stack=2 grayscale => C=2).
+    Combined feature extractor for Dict observations:
+      - "image": processed by a CNN (Nature-DQN architecture)
+      - "state": game variables vector, concatenated after CNN features
+
+    Final output = Linear(cnn_flat + state_dim) -> ReLU -> features_dim
     """
 
-    def __init__(self, observation_space, features_dim: int = 256):
+    def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
+        # Must call super with the actual features_dim we'll output
         super().__init__(observation_space, features_dim)
-        n_input_channels = int(observation_space.shape[0])
+
+        image_space = observation_space.spaces["image"]
+        state_space = observation_space.spaces["state"]
+
+        n_input_channels = int(image_space.shape[0])
+        state_dim = int(state_space.shape[0])
 
         self.cnn = nn.Sequential(
             nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4),
@@ -27,18 +37,42 @@ class CustomCNN(BaseFeaturesExtractor):
             nn.Flatten(),
         )
 
+        # Compute CNN output size
         with th.no_grad():
-            sample = th.as_tensor(observation_space.sample()[None]).float() / 255.0
-            n_flatten = self.cnn(sample).shape[1]
+            sample = th.as_tensor(image_space.sample()[None]).float() / 255.0
+            n_cnn_flat = self.cnn(sample).shape[1]
 
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten, features_dim),
+        # State branch: small MLP to give state features some nonlinearity
+        state_hidden = max(state_dim * 2, 16)
+        self.state_net = nn.Sequential(
+            nn.Linear(state_dim, state_hidden),
             nn.ReLU(),
         )
 
-    def forward(self, observations: th.Tensor) -> th.Tensor:
-        x = observations.float() / 255.0
-        return self.linear(self.cnn(x))
+        # Combined projection
+        self.linear = nn.Sequential(
+            nn.Linear(n_cnn_flat + state_hidden, features_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations: dict) -> th.Tensor:
+        img = observations["image"].float() / 255.0
+        state = observations["state"].float()
+
+        # --- V4 Debug: Verify state vector is alive ---
+        if not hasattr(self, "_debug_printed"):
+            self._debug_printed = 0
+        if self._debug_printed < 5:
+            # Print a few times at the start of training/eval to confirm
+            print(f"[DEBUG V4] state vector shape: {state.shape}, min: {state.min().item():.3f}, max: {state.max().item():.3f}, mean: {state.mean().item():.3f}")
+            self._debug_printed += 1
+        # ----------------------------------------------
+
+        cnn_features = self.cnn(img)
+        state_features = self.state_net(state)
+
+        combined = th.cat([cnn_features, state_features], dim=-1)
+        return self.linear(combined)
 
 
 class LSTMCompatibleGRU(nn.Module):

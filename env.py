@@ -88,12 +88,14 @@ class RewardWeights:
     weapon_switch_unproductive: float = 0.040
     weapon_switch_spam_window: int = 10
     weapon_switch_spam_penalty: float = 0.020
+    weapon_switch_cooldown: int = 5          # min steps between switches to not spam
 
     # Shooting hygiene
     shoot_no_damage: float = 0.006
     shoot_no_hit: float = 0.003
     shoot_no_ammo: float = 0.10
     shoot_waste_ammo: float = 0.020
+    blind_fire_penalty: float = 0.0        # v3: penalty for ATTACK when no enemy visible
 
     # Built-in scenario reward (from DoomGame.make_action)
     game_reward_scale: float = 1.0
@@ -116,6 +118,17 @@ class RewardWeights:
 
     enemy_retreat_low_health: float = 25.0
     enemy_retreat_low_ammo: float = 3.0
+
+    # -------- Engagement range (persona-specific) --------
+    engage_preferred_min: float = 80.0
+    engage_preferred_max: float = 250.0
+    engage_in_range_bonus: float = 0.0       # per-step bonus for being in preferred range
+
+    # -------- Backward penalty (context-aware) --------
+    backward_while_enemy_penalty: float = 0.0  # penalty for retreating when should be fighting
+
+    # -------- Weapon situational bonus --------
+    weapon_situational_bonus: float = 0.0    # reward for switching to right weapon for situation
 
     # -------- Goal distance shaping (toward current high-level goal) --------
     goal_dist_pickup: float = 0.018
@@ -159,7 +172,7 @@ def persona_weights(persona: str) -> RewardWeights:
         return RewardWeights(
             damage=0.100,
             hit=0.45,
-            damage_taken=0.035,
+            damage_taken=0.030,           # v2: was 0.035 — less dominant over closing reward
             hits_taken=0.06,
             death=14.0,
 
@@ -194,16 +207,19 @@ def persona_weights(persona: str) -> RewardWeights:
 
             inactive=0.024,
 
-            weapon_switch=0.035,
-            weapon_switch_noop=0.015,
-            weapon_switch_unproductive=0.050,
+            weapon_switch=0.015,          # v2: was 0.035 — less scary
+            weapon_switch_noop=0.008,     # v2: was 0.015 — less scary
+            weapon_switch_unproductive=0.025,  # v2: was 0.050 — less scary
             weapon_switch_spam_window=10,
             weapon_switch_spam_penalty=0.025,
+            weapon_switch_cooldown=5,
 
-            shoot_no_damage=0.007,
+            shoot_no_damage=0.005,
             shoot_no_hit=0.0035,
-            shoot_no_ammo=0.12,
-            shoot_waste_ammo=0.020,
+            shoot_no_ammo=0.15,
+            shoot_waste_ammo=0.025,       # v3: was 0.012 — stronger ammo waste penalty
+            blind_fire_penalty=0.0,       # v4: was 0.025 — disabled to encourage shooting
+
 
             game_reward_scale=1.0,
             game_reward_clip=30.0,
@@ -216,7 +232,7 @@ def persona_weights(persona: str) -> RewardWeights:
             kill_requires_recent_hit_steps=12,
             kill_requires_recent_attack_steps=18,
 
-            enemy_dist=0.016,
+            enemy_dist=0.060,             # v2: was 0.016 — 4× stronger closing reward
             enemy_retreat=0.014,
             enemy_dist_norm=64.0,
             enemy_min_safe=80.0,
@@ -225,6 +241,17 @@ def persona_weights(persona: str) -> RewardWeights:
             enemy_panic_penalty=0.150,
             enemy_retreat_low_health=25.0,
             enemy_retreat_low_ammo=3.0,
+
+            # v2: engagement range (rusher prefers close combat)
+            engage_preferred_min=80.0,
+            engage_preferred_max=250.0,
+            engage_in_range_bonus=0.040,
+
+            # v2: context-aware backward penalty
+            backward_while_enemy_penalty=0.020,
+
+            # v2: situational weapon switch reward
+            weapon_situational_bonus=0.150,
 
             goal_dist_pickup=0.020,
             goal_dist_enemy=0.012,
@@ -241,13 +268,13 @@ def persona_weights(persona: str) -> RewardWeights:
             search_turn_norm_deg=30.0,
             search_idle_penalty=0.002,
 
-            # NEW: aiming / engagement
-            aim=0.10,
+            # v2: wider aim for rusher (shotgun spread)
+            aim=1.0,                      # v4: was 0.20 — MASSIVE aim reward boost
             aim_err_norm_deg=45.0,
-            aim_center_thr_deg=15.0,
-            aim_center_bonus=0.100,
-            attack_on_target_bonus=0.300,
-            no_attack_on_target_penalty=0.025,
+            aim_center_thr_deg=30.0,      # v2: was 15.0 — achievable for rusher
+            aim_center_bonus=0.50,        # v4: was 0.08 — MASSIVE center bonus
+            attack_on_target_bonus=0.250, # v2: was 0.300 (distance-scaled in code)
+            no_attack_on_target_penalty=0.0,    # v4: was 0.030 — disabled to reduce shooting anxiety
             engage_dist_max=320.0,
             target_hold_steps=14,
 
@@ -389,9 +416,21 @@ class DoomDeathmatchEnv(gym.Env):
         self.actions: List[np.ndarray] = self._build_discrete_actions()
         self.action_space = spaces.Discrete(len(self.actions))
 
-        self.observation_space = spaces.Box(
-            low=0, high=255, shape=(self.stack, self.obs_size, self.obs_size), dtype=np.uint8
-        )
+        # State vector dimension (game variables fed to agent)
+        self._state_dim = 7  # hp, armor, ammo_sel, enemy_visible, enemy_angle_err, enemy_dist, weapon_id
+
+        self.observation_space = spaces.Dict({
+            "image": spaces.Box(
+                low=0, high=255,
+                shape=(self.stack, self.obs_size, self.obs_size),
+                dtype=np.uint8,
+            ),
+            "state": spaces.Box(
+                low=-1.0, high=1.0,
+                shape=(self._state_dim,),
+                dtype=np.float32,
+            ),
+        })
 
         # Episode / internal counters
         self._step_count = 0
@@ -567,6 +606,45 @@ class DoomDeathmatchEnv(gym.Env):
         self._frame_fifo = [gray] + self._frame_fifo[: self.stack - 1]
         obs = np.stack(self._frame_fifo, axis=0)
         return obs.astype(np.uint8)
+
+    def _build_state_vector(self, info: Dict[str, Any]) -> np.ndarray:
+        """Build normalized state vector from game variables.
+        
+        Returns float32 array of shape (self._state_dim,) with values in [-1, 1]:
+          [0] health / 100           (0 = dead, 1 = full)
+          [1] armor / 200            (0 = none, 1 = max)
+          [2] selected_weapon_ammo / 50  (0 = empty, 1+ = plenty)
+          [3] enemy_visible          (0 or 1)
+          [4] enemy_angle_err / 180  (signed, -1=far left, +1=far right, 0=centered)
+          [5] enemy_dist / 1000      (0=touching, 1=very far; -0.001 if not visible)
+          [6] selected_weapon / 7    (weapon id normalized)
+        """
+        hp = float(info.get("health", 0.0))
+        armor = float(info.get("armor", 0.0))
+        ammo_sel = float(info.get("selected_weapon_ammo", 0.0))
+        enemy_vis = float(info.get("enemy_visible", 0.0))
+        enemy_err = float(info.get("enemy_angle_err", 0.0))
+        enemy_dist = float(info.get("enemy_dist", -1.0))
+        weapon = float(info.get("selected_weapon", 1.0))
+
+        state = np.array([
+            np.clip(hp / 100.0, 0.0, 1.0),
+            np.clip(armor / 200.0, 0.0, 1.0),
+            np.clip(ammo_sel / 50.0, 0.0, 1.0),
+            enemy_vis,
+            np.clip(enemy_err / 180.0, -1.0, 1.0) if enemy_vis > 0.0 else 0.0,
+            np.clip(enemy_dist / 1000.0, 0.0, 1.0) if enemy_dist >= 0.0 else -0.001,
+            np.clip(weapon / 7.0, 0.0, 1.0),
+        ], dtype=np.float32)
+
+        return state
+
+    def _make_obs(self, image_obs: np.ndarray, info: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """Wrap image observation and state vector into Dict observation."""
+        return {
+            "image": image_obs,
+            "state": self._build_state_vector(info),
+        }
 
     def _ammo_total(self, info: Dict[str, Any]) -> float:
         # strict: only selected weapon ammo
@@ -943,7 +1021,9 @@ class DoomDeathmatchEnv(gym.Env):
             return bool(idx is not None and float(a_vec[idx]) != 0.0)
 
         is_attack = on("ATTACK")
-        is_move = on("MOVE_FORWARD") or on("MOVE_BACKWARD") or on("MOVE_LEFT_RIGHT_DELTA")
+        is_forward = on("MOVE_FORWARD")
+        is_backward = on("MOVE_BACKWARD")
+        is_move = is_forward or is_backward or on("MOVE_LEFT_RIGHT_DELTA")
         is_turn = on("TURN_LEFT_RIGHT_DELTA")
 
         is_weapon = False
@@ -956,7 +1036,8 @@ class DoomDeathmatchEnv(gym.Env):
                         is_weapon = True
                         break
 
-        return {"attack": is_attack, "move": is_move, "turn": is_turn, "weapon": is_weapon}
+        return {"attack": is_attack, "move": is_move, "turn": is_turn, "weapon": is_weapon,
+                "forward": is_forward, "backward": is_backward}
 
     # ---------- Reward ----------
 
@@ -1092,6 +1173,22 @@ class DoomDeathmatchEnv(gym.Env):
                     close_scale = float(np.clip((w.enemy_min_safe - enemy_now) / denom, 0.0, 1.0))
                     add("enemy_close", -w.enemy_close_penalty * close_scale * float(delta_close_norm))
 
+            # v2: Engagement range bonus — reward being in preferred combat range
+            if w.engage_in_range_bonus > 0.0 and not retreat:
+                if w.engage_preferred_min <= enemy_now <= w.engage_preferred_max:
+                    range_center = (w.engage_preferred_min + w.engage_preferred_max) / 2.0
+                    range_half = (w.engage_preferred_max - w.engage_preferred_min) / 2.0
+                    range_quality = 1.0 - abs(enemy_now - range_center) / max(1e-6, range_half)
+                    add("engage_in_range", w.engage_in_range_bonus * range_quality)
+
+        # v2: Context-aware backward penalty (don't retreat when should be fighting)
+        if w.backward_while_enemy_penalty > 0.0 and flags["backward"] and enemy_visible:
+            hp_ok = hp_now > w.low_health_thr
+            ammo_ok = ammo_now > 0
+            not_in_retreat = not ((hp_prev <= w.enemy_retreat_low_health) or (ammo_prev <= w.enemy_retreat_low_ammo))
+            if hp_ok and ammo_ok and not_in_retreat:
+                add("backward_combat", -w.backward_while_enemy_penalty)
+
         # ---- Aim shaping (NEW) ----
         if enemy_visible:
             d_err = float(err_abs_prev - err_abs_now)
@@ -1101,14 +1198,21 @@ class DoomDeathmatchEnv(gym.Env):
             if err_abs_now <= w.aim_center_thr_deg:
                 add("aim_center", w.aim_center_bonus)
                 if flags["attack"]:
-                    add("attack_on_target", w.attack_on_target_bonus)
+                    # v2: Distance-scaled attack bonus (stronger close, floor=0.25 for long range)
+                    if enemy_now >= 0.0:
+                        dist_scale = max(0.25, 1.0 - (enemy_now / max(1e-6, w.engage_dist_max)))
+                    else:
+                        dist_scale = 0.5  # enemy visible but no distance info
+                    add("attack_on_target", w.attack_on_target_bonus * dist_scale)
                 else:
                     if enemy_now >= 0.0 and enemy_now <= w.engage_dist_max and ammo_prev > 0.0:
                         add("no_attack_on_target", -w.no_attack_on_target_penalty)
             else:
+                pass
                 # Penalty for blind firing (shooting while crosshair is wildly off target)
-                if flags["attack"]:
-                    add("shoot_no_target", -0.010)
+                # v4 comment out to reduce anxiety:
+                # if flags["attack"]:
+                #     add("shoot_no_target", -0.010)
 
         # ---- Goal distance shaping ----
         goal_now = float(info.get("goal_dist", -1.0))
@@ -1125,9 +1229,11 @@ class DoomDeathmatchEnv(gym.Env):
 
         # ---- Search mode shaping ----
         if goal_mode == "search":
-            add("search_move", w.search_move_bonus * move_term)
-            turn_norm = min(abs(d_ang) / max(1e-6, w.search_turn_norm_deg), 1.0)
-            add("search_turn", w.search_turn_bonus * turn_norm)
+            # v3: Only reward search movement when NOT attacking (prevent spray-and-pray)
+            if not flags["attack"]:
+                add("search_move", w.search_move_bonus * move_term)
+                turn_norm = min(abs(d_ang) / max(1e-6, w.search_turn_norm_deg), 1.0)
+                add("search_turn", w.search_turn_bonus * turn_norm)
             if dist < 0.5:
                 add("search_idle", -w.search_idle_penalty)
 
@@ -1270,6 +1376,19 @@ class DoomDeathmatchEnv(gym.Env):
             if self._steps_since_weapon_select > w.weapon_switch_spam_window:
                 self._weapon_select_streak = 0
 
+        # v2: Situational weapon switch reward (right weapon for the situation)
+        if weapon_changed and w.weapon_situational_bonus > 0.0 and enemy_visible and enemy_now >= 0.0:
+            new_weapon = int(weapon_now)
+            # Shotgun at close range — primary rusher damage dealer
+            if new_weapon == 3 and enemy_now <= 200.0:
+                add("weapon_situational", w.weapon_situational_bonus)
+            # Heavy weapons (4-6) at safe medium distance
+            elif new_weapon >= 4 and enemy_now > 200.0:
+                add("weapon_situational", w.weapon_situational_bonus * 0.5)
+            # Any switch when current weapon ammo is empty — smart adaptation
+            elif ammo_sel_prev <= 0.0:
+                add("weapon_situational", w.weapon_situational_bonus * 0.3)
+
         # Shooting hygiene
         if flags["attack"]:
             shoot_scale = 1.0
@@ -1280,6 +1399,10 @@ class DoomDeathmatchEnv(gym.Env):
                     shoot_scale = 0.50
                 elif err_abs_now <= w.aim_err_norm_deg * 2.0:
                     shoot_scale = 0.80
+            else:
+                # v3: Blind fire penalty — attacking when no enemy is visible
+                if w.blind_fire_penalty > 0.0:
+                    add("blind_fire", -w.blind_fire_penalty)
 
             if ammo_now <= 0.0:
                 add("shoot_no_ammo", -w.shoot_no_ammo)
@@ -1406,6 +1529,8 @@ class DoomDeathmatchEnv(gym.Env):
             "goal_dist": float(info.get("goal_dist", -1.0)),
         }
 
+        obs = self._make_obs(obs, info)
+
         if _USING_GYMNASIUM:
             return obs, info
         return obs
@@ -1469,8 +1594,8 @@ class DoomDeathmatchEnv(gym.Env):
         else:
             info["goal_dist_delta"] = 0.0
 
-        info["terminated_by_death"] = bool(dead_now and not episode_finished)
-        info["terminated_by_game"] = bool(episode_finished)
+        info["terminated_by_death"] = bool(dead_now)
+        info["terminated_by_game"] = bool(episode_finished and not dead_now)
         info["terminated_by_stuck"] = False
 
         info["weapon_select_pressed"] = 1.0 if flags["weapon"] else 0.0
@@ -1566,6 +1691,8 @@ class DoomDeathmatchEnv(gym.Env):
                 info["r_stuck_end"] = float(comp["stuck_end"])
                 for k, v in comp.items():
                     info[f"r_{k}"] = float(v)
+
+        obs = self._make_obs(obs, info)
 
         if _USING_GYMNASIUM:
             return obs, float(reward), terminated, truncated, info

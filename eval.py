@@ -13,6 +13,9 @@ import numpy as np
 from sb3_contrib.ppo_recurrent import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
+# Ensure custom policy + extractor classes are importable for model loading
+from cnn_gru import CnnGruPolicy, CnnStateExtractor  # noqa: F401
+
 from env import make_env
 
 
@@ -159,6 +162,14 @@ def _extract_step_vars(info: Dict[str, Any]) -> Dict[str, float]:
         "r_aim_center": g("r_aim_center"),
         "r_attack_on_target": g("r_attack_on_target"),
         "r_no_attack_on_target": g("r_no_attack_on_target"),
+
+        # v2 reward components
+        "r_engage_in_range": g("r_engage_in_range"),
+        "r_backward_combat": g("r_backward_combat"),
+        "r_weapon_situational": g("r_weapon_situational"),
+
+        # v3 reward components
+        "r_blind_fire": g("r_blind_fire"),
     }
 
 
@@ -386,6 +397,10 @@ def main():
                             "r_search_move",
                             "r_search_turn",
                             "r_search_idle",
+
+                            "r_engage_in_range",
+                            "r_backward_combat",
+                            "r_weapon_situational",
 
                             "game_reward",
                         ],

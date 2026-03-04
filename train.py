@@ -9,7 +9,7 @@ from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 
 from env import make_env
-from cnn_gru import CnnGruPolicy, CustomCNN
+from cnn_gru import CnnGruPolicy, CnnStateExtractor
 from callback import (
     ActionDiagnosticsCallback,
     EntropyAnnealCallback,
@@ -63,7 +63,7 @@ def main():
     use_game_reward = bool(args.use_game_reward) and (not bool(args.disable_game_reward))
 
     print("=" * 70)
-    print(f"Training (RecurrentPPO + CustomCNN + GRU): {args.persona}")
+    print(f"Training (RecurrentPPO + CnnStateExtractor + GRU): {args.persona}")
     print(f"cfg={args.cfg} max_steps={args.max_steps} frame_skip={args.frame_skip}")
     print(f"n_envs={args.n_envs} timesteps={args.timesteps} lr={args.lr} ent={args.ent_coef}->{args.ent_final}")
     print(f"own_kill_user_var={args.own_kill_user_var}")
@@ -110,7 +110,7 @@ def main():
 
     # --- Policy kwargs ---
     policy_kwargs = dict(
-        features_extractor_class=CustomCNN,
+        features_extractor_class=CnnStateExtractor,
         features_extractor_kwargs=dict(features_dim=256),
         lstm_hidden_size=256,
         n_lstm_layers=1,
@@ -215,6 +215,14 @@ def main():
         "r_shoot_no_hit",
         "r_shoot_no_ammo",
         "r_shoot_waste_ammo",
+
+        # v2: new reward components
+        "r_engage_in_range",
+        "r_backward_combat",
+        "r_weapon_situational",
+
+        # v3: blind fire penalty
+        "r_blind_fire",
 
         # termination reasons / penalties
         "terminated_by_death",
