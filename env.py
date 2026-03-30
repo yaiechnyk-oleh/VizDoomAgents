@@ -166,10 +166,10 @@ class RewardWeights:
     clip_max: float = 30.0
 
 
-def persona_weights(persona: str) -> RewardWeights:
+def persona_weights(persona: str, overrides: dict | None = None) -> RewardWeights:
     persona = (persona or "rusher").lower().strip()
     if persona == "rusher":
-        return RewardWeights(
+        w = RewardWeights(
             damage=0.100,
             hit=0.45,
             damage_taken=0.030,           # v2: was 0.035 — less dominant over closing reward
@@ -280,7 +280,18 @@ def persona_weights(persona: str) -> RewardWeights:
 
             step_penalty=0.0,
         )
-    return RewardWeights()
+    else:
+        w = RewardWeights()
+
+    # Apply BO / manual overrides
+    if overrides:
+        from dataclasses import fields as dc_fields
+        valid = {f.name for f in dc_fields(w)}
+        for k, v in overrides.items():
+            if k not in valid:
+                raise ValueError(f"Unknown weight override: {k!r}")
+            setattr(w, k, type(getattr(w, k))(v))
+    return w
 
 
 # ---------------- Env ----------------
@@ -350,6 +361,7 @@ class DoomDeathmatchEnv(gym.Env):
         own_kill_user_var: int = 0,
         enable_weapon_actions: bool = True,
         use_game_reward: bool = True,
+        weight_overrides: dict | None = None,
     ):
         super().__init__()
         self.cfg_path = cfg_path
@@ -358,7 +370,7 @@ class DoomDeathmatchEnv(gym.Env):
         self.render_enabled = bool(render)
 
         self.persona = persona
-        self.w = persona_weights(persona)
+        self.w = persona_weights(persona, overrides=weight_overrides)
 
         self.obs_size = int(obs_size)
         self.stack = int(stack)
@@ -390,7 +402,11 @@ class DoomDeathmatchEnv(gym.Env):
         self.game.set_window_visible(self.render_enabled)
         self.game.set_mode(Mode.ASYNC_PLAYER if self.render_enabled else Mode.PLAYER)
 
-        self.game.set_screen_resolution(ScreenResolution.RES_320X240)
+        # Higher res for demo/watch mode, normal res for training
+        if self.render_enabled:
+            self.game.set_screen_resolution(ScreenResolution.RES_640X480)
+        else:
+            self.game.set_screen_resolution(ScreenResolution.RES_320X240)
         self.game.set_screen_format(ScreenFormat.RGB24)
 
         self.game.set_seed(self._seed)
@@ -1716,6 +1732,7 @@ def make_env(
     own_kill_user_var: int = 0,
     enable_weapon_actions: bool = True,
     use_game_reward: bool = True,
+    weight_overrides: dict | None = None,
 ):
     def _thunk():
         return DoomDeathmatchEnv(
@@ -1729,5 +1746,6 @@ def make_env(
             own_kill_user_var=own_kill_user_var,
             enable_weapon_actions=enable_weapon_actions,
             use_game_reward=use_game_reward,
+            weight_overrides=weight_overrides,
         )
     return _thunk

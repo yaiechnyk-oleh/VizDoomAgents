@@ -9,10 +9,21 @@ import numpy as np
 
 from env import DoomDeathmatchEnv
 
-def assert_obs(obs: np.ndarray, stack: int, size: int) -> None:
-    assert isinstance(obs, np.ndarray), f"obs must be np.ndarray, got {type(obs)}"
-    assert obs.dtype == np.uint8, f"obs dtype must be uint8, got {obs.dtype}"
-    assert obs.shape == (stack, size, size), f"obs shape must be {(stack, size, size)}, got {obs.shape}"
+def assert_obs(obs: Any, stack: int, size: int) -> None:
+    if isinstance(obs, dict):
+        assert "image" in obs, f"Dict obs missing 'image' key, got keys: {list(obs.keys())}"
+        assert "state" in obs, f"Dict obs missing 'state' key, got keys: {list(obs.keys())}"
+        img = obs["image"]
+        assert isinstance(img, np.ndarray), f"image must be np.ndarray, got {type(img)}"
+        assert img.dtype == np.uint8, f"image dtype must be uint8, got {img.dtype}"
+        assert img.shape == (stack, size, size), f"image shape must be {(stack, size, size)}, got {img.shape}"
+        st = obs["state"]
+        assert isinstance(st, np.ndarray), f"state must be np.ndarray, got {type(st)}"
+        assert st.dtype == np.float32, f"state dtype must be float32, got {st.dtype}"
+    else:
+        assert isinstance(obs, np.ndarray), f"obs must be np.ndarray, got {type(obs)}"
+        assert obs.dtype == np.uint8, f"obs dtype must be uint8, got {obs.dtype}"
+        assert obs.shape == (stack, size, size), f"obs shape must be {(stack, size, size)}, got {obs.shape}"
 
 
 def is_finite(x: float) -> bool:

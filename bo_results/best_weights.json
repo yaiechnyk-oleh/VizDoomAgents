@@ -1,0 +1,10 @@
+{
+  "score": 12.640332762013585,
+  "weights": {
+    "enemy_dist": 0.07494481426168349,
+    "backward_while_enemy_penalty": 0.09507143064099162,
+    "death": 16.78392730173686,
+    "weapon_situational_bonus": 0.25953046946896285,
+    "blind_fire_penalty": 0.006240745617697461
+  }
+}

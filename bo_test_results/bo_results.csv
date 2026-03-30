@@ -1,0 +1,2 @@
+iteration,score,mean_reward,kills_attrib,damage_dealt,hits,hits_taken,damage_taken,deaths,action_top_frac,unique_actions,train_time_s,enemy_dist,backward_while_enemy_penalty,death,weapon_situational_bonus,blind_fire_penalty
+1,-17.0,-4.452981955371797,0.0,0.0,0.0,6.0,105.0,1.0,1.0,1,28.921841859817505,0.07494481426168349,0.09507143064099162,16.78392730173686,0.25953046946896285,0.006240745617697461

@@ -16,6 +16,10 @@ models/
 results/
 data/
 
+# 5b. Ignore BO model checkpoints (large .zip files)
+bo_results/*.zip
+bo_test_results/*.zip
+
 # 5. Ignore System files
 .DS_Store
 
