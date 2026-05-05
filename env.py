@@ -174,7 +174,7 @@ def persona_weights(persona: str, overrides: dict | None = None) -> RewardWeight
             hit=0.45,
             damage_taken=0.030,           # v2: was 0.035 — less dominant over closing reward
             hits_taken=0.06,
-            death=14.0,
+            death=16.784,                 # v5/BO: was 14.0 — higher survival importance
 
             monster_kill=10.0,
             frag_penalty=3.5,
@@ -218,7 +218,7 @@ def persona_weights(persona: str, overrides: dict | None = None) -> RewardWeight
             shoot_no_hit=0.0035,
             shoot_no_ammo=0.15,
             shoot_waste_ammo=0.025,       # v3: was 0.012 — stronger ammo waste penalty
-            blind_fire_penalty=0.0,       # v4: was 0.025 — disabled to encourage shooting
+            blind_fire_penalty=0.006,     # v5/BO: was 0.0 — tiny spray penalty (not gun-fear)
 
 
             game_reward_scale=1.0,
@@ -232,7 +232,7 @@ def persona_weights(persona: str, overrides: dict | None = None) -> RewardWeight
             kill_requires_recent_hit_steps=12,
             kill_requires_recent_attack_steps=18,
 
-            enemy_dist=0.060,             # v2: was 0.016 — 4× stronger closing reward
+            enemy_dist=0.075,             # v5/BO: was 0.060 — stronger rush incentive
             enemy_retreat=0.014,
             enemy_dist_norm=64.0,
             enemy_min_safe=80.0,
@@ -248,10 +248,10 @@ def persona_weights(persona: str, overrides: dict | None = None) -> RewardWeight
             engage_in_range_bonus=0.040,
 
             # v2: context-aware backward penalty
-            backward_while_enemy_penalty=0.020,
+            backward_while_enemy_penalty=0.095,  # v5/BO: was 0.020 — 5× stronger anti-backpedaling
 
             # v2: situational weapon switch reward
-            weapon_situational_bonus=0.150,
+            weapon_situational_bonus=0.260,     # v5/BO: was 0.150 — smarter weapon switching
 
             goal_dist_pickup=0.020,
             goal_dist_enemy=0.012,
